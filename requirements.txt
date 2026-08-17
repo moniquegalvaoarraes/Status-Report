@@ -1,0 +1,7 @@
+streamlit==1.31.0
+pandas==2.2.0
+openpyxl==3.1.2
+python-calamine==0.2.0
+lxml==5.1.0
+python-pptx==1.0.2
+plotly==5.20.0

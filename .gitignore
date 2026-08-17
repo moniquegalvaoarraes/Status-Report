@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+# Streamlit secrets (contém senhas corporativas)
+.streamlit/secrets.toml
+
+# Bases de dados e arquivos locais (evitar expor dados corporativos sensíveis)
+*.xlsx
+*.csv
+*.pdf
+*.html
+*.pptx
+*.log
+sync_error.log
+debug_response.html
+
+# Pastas temporárias e de rascunho
+scratch/
+temp_*.js
+temp_*.html
