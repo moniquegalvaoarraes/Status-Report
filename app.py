@@ -280,6 +280,25 @@ def find_column_by_variants(df, variants):
                 return orig
     return None
 
+def convert_strict_to_transitional(file_bytes):
+    import zipfile, io
+    zin = zipfile.ZipFile(io.BytesIO(file_bytes), 'r')
+    buf = io.BytesIO()
+    zout = zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED)
+    for item in zin.infolist():
+        buffer = zin.read(item.filename)
+        if item.filename.endswith('.xml') or item.filename.endswith('.rels'):
+            text = buffer.decode('utf-8', errors='ignore')
+            if 'http://purl.oclc.org/ooxml/' in text:
+                text = text.replace('http://purl.oclc.org/ooxml/spreadsheetml/main', 'http://schemas.openxmlformats.org/spreadsheetml/2006/main')
+                text = text.replace('http://purl.oclc.org/ooxml/officeDocument/relationships', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships')
+                buffer = text.encode('utf-8')
+        zout.writestr(item, buffer)
+    zout.close()
+    zin.close()
+    buf.seek(0)
+    return buf
+
 def load_data(uploaded_file, name):
     if uploaded_file is None:
         return None
@@ -299,24 +318,41 @@ def load_data(uploaded_file, name):
                     uploaded_file.seek(0)
                     df = pd.read_csv(uploaded_file, sep=',', encoding='utf-8')
         else:
-            # Salva temporariamente em disco para garantir que engines nativas (como calamine) leiam perfeitamente
-            import tempfile
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
-                tmp.write(uploaded_file.getvalue())
-                tmp_path = tmp.name
-                
+            raw_bytes = uploaded_file.getvalue()
+            
+            # 1. Tenta Calamine diretamente (muito rápido e preciso)
             try:
-                # Tenta primeiro com calamine (suporta Strict Open XML do Template)
+                import python_calamine
+                wb = python_calamine.load_workbook(io.BytesIO(raw_bytes))
+                if wb.sheet_names:
+                    sheet = wb.get_sheet_by_name(wb.sheet_names[0])
+                    rows = sheet.to_python()
+                    if rows and len(rows) > 0:
+                        df = pd.DataFrame(rows[1:], columns=rows[0])
+            except Exception:
+                pass
+                
+            # 2. Tenta pd.read_excel padrão
+            if df is None or df.empty:
                 try:
-                    df = pd.read_excel(tmp_path, engine='calamine')
+                    df = pd.read_excel(io.BytesIO(raw_bytes), engine='calamine')
                 except Exception:
-                    df = pd.read_excel(tmp_path, engine='openpyxl')
-            finally:
-                if os.path.exists(tmp_path):
-                    try:
-                        os.unlink(tmp_path)
-                    except Exception:
-                        pass
+                    pass
+                    
+            # 3. Tenta openpyxl padrão
+            if df is None or df.empty:
+                try:
+                    df = pd.read_excel(io.BytesIO(raw_bytes), engine='openpyxl')
+                except Exception:
+                    pass
+                    
+            # 4. Fallback infalível para Strict Open XML: converte os namespaces XML em memória
+            if df is None or df.empty:
+                try:
+                    converted_buf = convert_strict_to_transitional(raw_bytes)
+                    df = pd.read_excel(converted_buf, engine='openpyxl')
+                except Exception as final_e:
+                    raise Exception(f"Não foi possível ler o arquivo Excel nas engines disponíveis: {final_e}")
         
         if df is not None:
             # Garante que não haja espaços invisíveis nos nomes das colunas
