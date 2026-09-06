@@ -40,7 +40,11 @@ STATUS_MAPPING = {
     "Em execução": "Em atendimento",
     "Direcionamento do chamado (Consultor)": "Em atendimento",
     "Redirecionamento do chamado (Devolução)": "Em atendimento",
-    "Oportunidade de Melhoria": "Em atendimento"
+    "Oportunidade de Melhoria": "Em atendimento",
+    "Encerrado": "Resolvido",
+    "Encerrada": "Resolvido",
+    "Cancelado": "Cancelado",
+    "Cancelada": "Cancelado"
 }
 
 def extract_data_from_multidados(limit_date_str=None):
@@ -898,7 +902,6 @@ with tab1:
                     st.warning(f"Não foi possível validar os chamados do ServiceNow faltantes pois a coluna '{col_sn_id}' não foi encontrada.")
 
                 # 2.5 - Chamados no MD que não estão no SN (pelo Nº Ocorrência Externa)
-                # Pegar ocorrencias no MD que não sejam nulas
                 valid_md_ext = df_md_clean[df_md_clean[col_md_ext].notna() & (df_md_clean[col_md_ext].astype(str).str.strip() != '') & (df_md_clean[col_md_ext].astype(str).str.strip().str.lower() != 'nan')]
                 
                 # Lista de chaves do SN completo (em maiúsculo)
@@ -907,14 +910,23 @@ with tab1:
                 valid_md_norm = valid_md_ext[col_md_ext].astype(str).str.strip().str.upper().str.replace('.0', '', regex=False)
                 md_not_in_sn = valid_md_ext[~valid_md_norm.isin(sn_all_ids)]
 
-                # Lista de Ocorrencias Externas faltando no SN para pintarmos de vermelho depois
-                missing_in_sn_ids = set(md_not_in_sn[col_md_ext].astype(str).str.strip().str.replace('.0', '', regex=False).tolist())
+                # Separa chamados ativos de chamados que já constam como Encerrados no Multidados
+                is_closed_status = md_not_in_sn['Status (sem tempo decorrido)'].astype(str).str.strip().str.lower().isin(['encerrado', 'encerrada', 'cancelado', 'cancelada'])
+                md_missing_active = md_not_in_sn[~is_closed_status]
+                md_missing_closed = md_not_in_sn[is_closed_status]
 
-                if not md_not_in_sn.empty:
-                    st.error(f"⚠️ Atenção! Encontrados **{len(md_not_in_sn)} chamados** no Multidados cujo *Nº Ocorrência Externa* **NÃO consta na extração do ServiceNow**. Eles serão destacados em vermelho na planilha final.")
-                    st.dataframe(md_not_in_sn[[col_md_id, col_md_ext, 'Status (sem tempo decorrido)']].head(10))
+                # Apenas os chamados ATIVOS que faltam no SN serão destacados em vermelho na planilha final
+                missing_in_sn_ids = set(md_missing_active[col_md_ext].astype(str).str.strip().str.replace('.0', '', regex=False).tolist())
+
+                if not md_missing_active.empty:
+                    st.error(f"⚠️ Atenção! Encontrados **{len(md_missing_active)} chamados ATIVOS** no Multidados cujo *Nº Ocorrência Externa* **NÃO consta na extração do ServiceNow**. Eles serão destacados em vermelho na planilha final.")
+                    st.dataframe(md_missing_active[[col_md_id, col_md_ext, 'Status (sem tempo decorrido)']].head(10))
                 else:
-                    st.success("✅ Todos os chamados com Nº Ocorrência Externa constam no ServiceNow.")
+                    st.success("✅ Todos os chamados ativos com Nº Ocorrência Externa constam no ServiceNow.")
+
+                if not md_missing_closed.empty:
+                    with st.expander(f"ℹ️ Ver {len(md_missing_closed)} chamados já Encerrados no Multidados que não constam na planilha do ServiceNow"):
+                        st.dataframe(md_missing_closed[[col_md_id, col_md_ext, 'Status (sem tempo decorrido)']])
             else:
                 missing_in_sn_ids = set()
                 if col_md_ext not in df_md.columns:
@@ -1003,10 +1015,15 @@ with tab1:
                                 'Status ServiceNow (Esperado)': expected_sn_status
                             })
 
-                        # Regra nova: SN Encerrado/Resolvido mas MD não encerrado
+                        # Regra 1: SN Encerrado/Resolvido mas MD não encerrado
                         if str(sn_status).strip().lower() in ['encerrado', 'resolvido']:
                             if str(md_status).strip().lower() not in ['encerrado', 'resolvido', 'encerrada', 'resolvida']:
                                 st.error(f"🛑 Divergência Crítica: O chamado **SN {num_ocorr_ext}** (MD {t_id}) está marcado como *{sn_status}* no ServiceNow, mas no Multidados consta como *{md_status}*.")
+
+                        # Regra 2: MD Encerrado/Cancelado mas SN com status diferente de Resolvido/Encerrado
+                        if str(md_status).strip().lower() in ['encerrado', 'encerrada', 'cancelado', 'cancelada']:
+                            if str(sn_status).strip().lower() not in ['resolvido', 'encerrado', 'cancelado', 'fechado', 'closed', 'resolved']:
+                                st.error(f"⚠️ Atenção: O chamado **MD {t_id}** (SN {num_ocorr_ext}) está marcado como *{md_status}* no Multidados, mas no ServiceNow o status é *{sn_status}* (deveria estar como **Resolvido**).")
 
             if divergences:
                 st.warning(f"❌ Foram encontradas **{len(divergences)} divergências** de status entre Multidados e ServiceNow baseadas na tabela De/Para:")
