@@ -284,6 +284,51 @@ def find_column_by_variants(df, variants):
                 return orig
     return None
 
+ABACO_CONSULTANTS = [
+    "Monique Galvao Silva Arraes",
+    "Edson Akio Yamane",
+    "Yeymy Rosario Ali Tapia",
+    "João Victor Ceron Blanco",
+    "Regiane Kawamura",
+    "Marcos Tadeu",
+    "Marcos Tadeu da Silva",
+    "Carla Hernandez",
+    "Carla Nishida",
+    "Carla de Branco Nishida",
+    "Priscila Dayana Candido",
+    "Raoni Santos",
+    "Guilherme Thomaz",
+    "Guilherme Neves Thomaz",
+    "Enzo Simão de Lima",
+    "Guilherme Oliveira Shiroma",
+    "Marcelo Lima Santos",
+    "Marcelo da Silva Lima",
+    "Enildo Gomes",
+    "Enildo da Silva Gomes",
+    "Alisson Carlos da Silva",
+    "Allan Martins",
+    "Allan Ruiz Martins",
+    "Fabio Argese Ribeiro",
+    "Pedro Ribeiro",
+    "Adriano Costa Cruz",
+    "Eduardo Palacio Chagas",
+    "Alexsandro Goes da Silva",
+    "Nathalia da Silva de Almeida Costa"
+]
+
+def is_abaco_consultant(name):
+    if not name or pd.isna(name) or str(name).strip().lower() == 'nan':
+        return False
+    name_clean = clean_col_name(str(name))
+    for c in ABACO_CONSULTANTS:
+        c_clean = clean_col_name(c)
+        if c_clean in name_clean or name_clean in c_clean:
+            return True
+        parts = c_clean.split()
+        if len(parts) >= 2 and parts[0] in name_clean and parts[-1] in name_clean:
+            return True
+    return False
+
 def convert_strict_to_transitional(file_bytes):
     import zipfile, io
     zin = zipfile.ZipFile(io.BytesIO(file_bytes), 'r')
@@ -858,6 +903,8 @@ with tab1:
             col_sn_id = find_column_by_variants(df_sn, ['Número', 'Numero', 'Number', 'Task', 'Sys_id', 'Chamado', 'Task_number']) or 'Número'
             col_tpl_id = find_column_by_variants(df_template, ['N.º', 'N.o', 'Nº', 'No', 'Numero', 'ID']) or 'N.º'
             col_md_ext = find_column_by_variants(df_md, ['Nº Ocorrência Externa', 'Ocorrência Externa', 'Ocorrencia Externa', 'ServiceNow', 'Externa']) or 'Nº Ocorrência Externa'
+            col_sn_assignee = find_column_by_variants(df_sn, ['Atribuído a', 'Atribuido a', 'Designado a', 'Atribuído', 'Atribuido', 'Assigned to', 'Responsável']) or 'Atribuído a'
+            col_sn_status = find_column_by_variants(df_sn, ['Estado', 'Status', 'State']) or 'Estado'
 
             # Validações de integridade dos arquivos carregados
             if col_sn_id not in df_sn.columns:
@@ -892,12 +939,17 @@ with tab1:
                 if col_sn_id in df_sn_clean.columns:
                     sn_clean_series = df_sn_clean[col_sn_id].astype(str).str.strip().str.upper().str.replace('.0', '', regex=False)
                     sn_not_in_md = df_sn_clean[~sn_clean_series.isin(md_ext_ids_all)]
+                    
+                    # Considerar apenas chamados atribuídos a consultores Ábaco
+                    if col_sn_assignee in sn_not_in_md.columns:
+                        sn_not_in_md = sn_not_in_md[sn_not_in_md[col_sn_assignee].apply(is_abaco_consultant)]
+                    
                     if not sn_not_in_md.empty:
-                        st.warning(f"⚠️ Atenção! Encontrados **{len(sn_not_in_md)} chamados** no ServiceNow que **NÃO constam no Multidados** (Nº Ocorrência Externa):")
-                        cols_to_disp = [c for c in [col_sn_id, 'Estado', 'Atribuído a'] if c in sn_not_in_md.columns]
+                        st.warning(f"⚠️ Atenção! Encontrados **{len(sn_not_in_md)} chamados** no ServiceNow atribuídos à equipe Ábaco que **NÃO constam no Multidados** (Nº Ocorrência Externa):")
+                        cols_to_disp = [c for c in [col_sn_id, col_sn_status, col_sn_assignee] if c in sn_not_in_md.columns]
                         st.dataframe(sn_not_in_md[cols_to_disp].head(10))
                     else:
-                        st.success("✅ Todos os chamados do ServiceNow constam no Multidados.")
+                        st.success("✅ Todos os chamados da Ábaco do ServiceNow constam no Multidados.")
                 else:
                     st.warning(f"Não foi possível validar os chamados do ServiceNow faltantes pois a coluna '{col_sn_id}' não foi encontrada.")
 
@@ -921,6 +973,7 @@ with tab1:
                 if not md_missing_active.empty:
                     st.error(f"⚠️ Atenção! Encontrados **{len(md_missing_active)} chamados ATIVOS** no Multidados cujo *Nº Ocorrência Externa* **NÃO consta na extração do ServiceNow**. Eles serão destacados em vermelho na planilha final.")
                     st.dataframe(md_missing_active[[col_md_id, col_md_ext, 'Status (sem tempo decorrido)']].head(10))
+                    st.info("💡 **Dica sobre o filtro do ServiceNow:** Se algum chamado ativo foi listado acima mas ele existe no ServiceNow (por exemplo, chamados repassados para alguém da TI), verifique o filtro da sua extração no ServiceNow. Se o filtro estiver restrito apenas aos nomes dos consultores Ábaco, chamados que estão com a equipe de TI não virão na extração.")
                 else:
                     st.success("✅ Todos os chamados ativos com Nº Ocorrência Externa constam no ServiceNow.")
 
@@ -935,6 +988,7 @@ with tab1:
 
             # 3. Comparar Existentes
             divergences = []
+            external_assignees = []
 
             for idx, row in df_template.iterrows():
                 t_id = str(row.get(col_tpl_id, ''))
@@ -973,10 +1027,8 @@ with tab1:
                 # Operador responsável -> Atribuído
                 if 'Operador responsável' in md_row.index and 'Atribuído' in df_template.columns:
                     val = md_row['Operador responsável']
-                    if pd.notna(val):
-                        # Nao sobreescrever se a regra do ServiceNow ja tiver preenchido (ver abaixo)
-                        if pd.isna(df_template.at[idx, 'Atribuído']) or str(df_template.at[idx, 'Atribuído']).strip() == '':
-                             df_template.at[idx, 'Atribuído'] = val
+                    if pd.notna(val) and str(val).strip() != '' and str(val).strip().lower() != 'nan':
+                        df_template.at[idx, 'Atribuído'] = val
 
                 # Solicitação -> Módulo (com limpeza de texto)
                 if 'Solicitação' in md_row.index and 'Módulo' in df_template.columns:
@@ -1001,7 +1053,27 @@ with tab1:
                                 df_template.at[idx, 'Solicitante'] = val_solic
 
                         md_status = md_row.get('Status (sem tempo decorrido)', '')
-                        sn_status = sn_row.get('Estado', '')
+                        sn_status = sn_row.get(col_sn_status, sn_row.get('Estado', ''))
+                        sn_assignee = sn_row.get(col_sn_assignee, sn_row.get('Atribuído a', ''))
+
+                        # Validar Atribuição (Ábaco vs Externa)
+                        if pd.notna(sn_assignee) and str(sn_assignee).strip() != '' and str(sn_assignee).strip().lower() != 'nan':
+                            sn_assignee_str = str(sn_assignee).strip()
+                            if is_abaco_consultant(sn_assignee_str):
+                                # Se no template ainda não tem atribuição, preenche com o consultor Ábaco do SN
+                                if pd.isna(df_template.at[idx, 'Atribuído']) or str(df_template.at[idx, 'Atribuído']).strip() == '':
+                                    df_template.at[idx, 'Atribuído'] = sn_assignee_str
+                            else:
+                                # Não é consultor Ábaco (ex: pessoal da TI BK)
+                                abaco_resp = md_row.get('Operador responsável', '') or row.get('Atribuído', '')
+                                external_assignees.append({
+                                    'Nº Multidados': t_id,
+                                    'Nº ServiceNow': num_ocorr_ext,
+                                    'Consultor Ábaco': abaco_resp,
+                                    'Atribuído no ServiceNow': sn_assignee_str,
+                                    'Status Multidados': md_status,
+                                    'Status ServiceNow': sn_status
+                                })
 
                         expected_sn_status = STATUS_MAPPING.get(md_status, 'Não mapeado')
 
@@ -1028,6 +1100,11 @@ with tab1:
             if divergences:
                 st.warning(f"❌ Foram encontradas **{len(divergences)} divergências** de status entre Multidados e ServiceNow baseadas na tabela De/Para:")
                 st.dataframe(pd.DataFrame(divergences))
+
+            if external_assignees:
+                st.warning(f"⚠️ **Chamados com responsáveis fora da Ábaco no ServiceNow ({len(external_assignees)}):**")
+                st.info("💡 Esses chamados foram localizados no ServiceNow, mas estão atribuídos a pessoas de fora da equipe Ábaco (ex: equipe de TI). O relatório manteve o consultor da Ábaco responsável.")
+                st.dataframe(pd.DataFrame(external_assignees))
 
             # 4. Filter final Template (drop old closed tickets) and Download
             st.divider()
