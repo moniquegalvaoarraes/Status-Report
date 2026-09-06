@@ -1075,17 +1075,39 @@ with tab1:
                                     'Status ServiceNow': sn_status
                                 })
 
+                        # Verificar se existe alguma ocorrência no Multidados ativa vinculada a este chamado do ServiceNow (ex: alteração de projeto)
+                        has_other_md_active = False
+                        if col_md_ext in df_md.columns and col_md_id in df_md.columns:
+                            other_md = df_md[
+                                (df_md[col_md_id].astype(str).str.strip() != t_id) &
+                                (df_md[col_md_ext].astype(str).str.strip().str.upper().str.replace('.0', '', regex=False) == num_ocorr_ext.upper())
+                            ]
+                            other_md_active = other_md[~other_md['Status (sem tempo decorrido)'].astype(str).str.strip().str.lower().isin(['encerrado', 'encerrada', 'cancelado', 'cancelada'])]
+                            if not other_md_active.empty:
+                                has_other_md_active = True
+
+                        if not has_other_md_active and 'ServiceNow' in df_template.columns and col_tpl_id in df_template.columns:
+                            other_tpl = df_template[
+                                (df_template[col_tpl_id].astype(str).str.strip() != t_id) &
+                                (df_template['ServiceNow'].astype(str).str.strip().str.upper().str.replace('.0', '', regex=False) == num_ocorr_ext.upper())
+                            ]
+                            other_tpl_active = other_tpl[~other_tpl['Status (sem tempo decorrido)'].astype(str).str.strip().str.lower().isin(['encerrado', 'encerrada', 'cancelado', 'cancelada'])]
+                            if not other_tpl_active.empty:
+                                has_other_md_active = True
+
                         expected_sn_status = STATUS_MAPPING.get(md_status, 'Não mapeado')
 
                         if expected_sn_status != 'Não mapeado' and str(sn_status).strip().lower() != expected_sn_status.lower():
-                            divergences.append({
-                                'Nº (Multidados)': t_id,
-                                'Nº (ServiceNow)': num_ocorr_ext,
-                                'Operador Responsável': md_row.get('Operador responsável', ''),
-                                'Status Multidados': md_status,
-                                'Status ServiceNow (Atual)': sn_status,
-                                'Status ServiceNow (Esperado)': expected_sn_status
-                            })
+                            # Se o chamado no MD está encerrado, mas existe outra ocorrência ativa no MD para o mesmo SN (alteração de projeto), não considera divergência
+                            if not (str(md_status).strip().lower() in ['encerrado', 'encerrada', 'cancelado', 'cancelada'] and has_other_md_active):
+                                divergences.append({
+                                    'Nº (Multidados)': t_id,
+                                    'Nº (ServiceNow)': num_ocorr_ext,
+                                    'Operador Responsável': md_row.get('Operador responsável', ''),
+                                    'Status Multidados': md_status,
+                                    'Status ServiceNow (Atual)': sn_status,
+                                    'Status ServiceNow (Esperado)': expected_sn_status
+                                })
 
                         # Regra 1: SN Encerrado/Resolvido mas MD não encerrado
                         if str(sn_status).strip().lower() in ['encerrado', 'resolvido']:
@@ -1095,7 +1117,9 @@ with tab1:
                         # Regra 2: MD Encerrado/Cancelado mas SN com status diferente de Resolvido/Encerrado
                         if str(md_status).strip().lower() in ['encerrado', 'encerrada', 'cancelado', 'cancelada']:
                             if str(sn_status).strip().lower() not in ['resolvido', 'encerrado', 'cancelado', 'fechado', 'closed', 'resolved']:
-                                st.error(f"⚠️ Atenção: O chamado **MD {t_id}** (SN {num_ocorr_ext}) está marcado como *{md_status}* no Multidados, mas no ServiceNow o status é *{sn_status}* (deveria estar como **Resolvido**).")
+                                # Se houver outra ocorrência ativa no Multidados (ex: alteração de projeto), não emite alerta
+                                if not has_other_md_active:
+                                    st.warning(f"⚠️ Atenção: O chamado **MD {t_id}** (SN {num_ocorr_ext}) está marcado como *{md_status}* no Multidados, mas no ServiceNow o status é *{sn_status}*.")
 
             if divergences:
                 st.warning(f"❌ Foram encontradas **{len(divergences)} divergências** de status entre Multidados e ServiceNow baseadas na tabela De/Para:")
