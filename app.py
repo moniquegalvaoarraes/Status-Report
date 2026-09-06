@@ -244,7 +244,7 @@ def extract_data_from_multidados(limit_date_str=None):
             cleaned_columns.append(col_clean)
             
         df.columns = cleaned_columns
-        return df
+        return remove_status_report_tickets(df)
         
     except Exception as e:
         import traceback
@@ -257,30 +257,94 @@ def extract_data_from_multidados(limit_date_str=None):
         st.error(f"Erro ao conectar com o Multidados: {e}")
         return None
 
+import unicodedata
+
+def clean_col_name(s):
+    if not isinstance(s, str):
+        s = str(s)
+    s = s.strip()
+    return unicodedata.normalize('NFKD', s).encode('ASCII', 'ignore').decode('utf-8').lower()
+
+def find_column_by_variants(df, variants):
+    if df is None or not hasattr(df, 'columns'):
+        return None
+    cleaned_cols = {clean_col_name(c): c for c in df.columns}
+    for v in variants:
+        v_clean = clean_col_name(v)
+        if v_clean in cleaned_cols:
+            return cleaned_cols[v_clean]
+    for v in variants:
+        v_clean = clean_col_name(v)
+        for c_clean, orig in cleaned_cols.items():
+            if v_clean in c_clean:
+                return orig
+    return None
+
 def load_data(uploaded_file, name):
     if uploaded_file is None:
         return None
     
     filename = uploaded_file.name.lower()
+    df = None
     try:
         if filename.endswith(".csv"):
-            return pd.read_csv(uploaded_file, sep=';', encoding='utf-8')
+            try:
+                # Tenta detectar o separador automaticamente
+                df = pd.read_csv(uploaded_file, sep=None, engine='python', encoding='utf-8')
+            except Exception:
+                try:
+                    uploaded_file.seek(0)
+                    df = pd.read_csv(uploaded_file, sep=';', encoding='utf-8')
+                except Exception:
+                    uploaded_file.seek(0)
+                    df = pd.read_csv(uploaded_file, sep=',', encoding='utf-8')
         else:
-            # Usando calamine para xlsx mais complexos (como o Strict Open XML do Template)
-            if name == "Template":
-                 # Fallback para engine openpyxl se der erro, mas tentamos calamine primeiro
-                 try:
-                     return pd.read_excel(uploaded_file, engine='calamine')
-                 except:
-                     return pd.read_excel(uploaded_file, engine='openpyxl')
-            else:
-                 return pd.read_excel(uploaded_file)
+            # Salva temporariamente em disco para garantir que engines nativas (como calamine) leiam perfeitamente
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+                tmp.write(uploaded_file.getvalue())
+                tmp_path = tmp.name
+                
+            try:
+                # Tenta primeiro com calamine (suporta Strict Open XML do Template)
+                try:
+                    df = pd.read_excel(tmp_path, engine='calamine')
+                except Exception:
+                    df = pd.read_excel(tmp_path, engine='openpyxl')
+            finally:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except Exception:
+                        pass
+        
+        if df is not None:
+            # Garante que não haja espaços invisíveis nos nomes das colunas
+            df.columns = [str(c).strip() for c in df.columns]
+        return df
     except Exception as e:
         st.error(f"Erro ao carregar o arquivo {name}: {e}")
         return None
 
+def remove_status_report_tickets(df, status_col=None):
+    if df is None or df.empty:
+        return df
+    target_col = status_col
+    if not target_col or target_col not in df.columns:
+        target_col = find_column_by_variants(df, ['Status (sem tempo decorrido)', 'Status', 'Estado'])
+    if target_col and target_col in df.columns:
+        status_series = df[target_col].astype(str).str.strip().str.lower()
+        mask_exclude = status_series.isin(['status report']) | status_series.str.contains('status report', case=False, na=False)
+        return df[~mask_exclude].copy()
+    return df
+
 def filter_active_tickets(df, date_cols, status_col, closed_statuses):
     if df is None or df.empty or status_col not in df.columns:
+        return df
+    
+    # 1. Despreza obrigatoriamente qualquer registro com status 'Status Report'
+    df = remove_status_report_tickets(df, status_col=status_col)
+    if df.empty:
         return df
     
     hoje = datetime.date.today()
@@ -732,6 +796,10 @@ with tab1:
 
         if df_template is not None and df_md is not None and df_sn is not None:
 
+            # Desprezar chamados com status 'Status Report' logo no início
+            df_template = remove_status_report_tickets(df_template)
+            df_md = remove_status_report_tickets(df_md)
+
             # Filtrar chamados Encerrados/Cancelados em meses anteriores (Apenas nas bases de origem por enquanto)
             closed_md = ['Encerrado', 'Encerrada', 'Cancelado', 'Cancelada']
             closed_sn = ['Encerrado', 'Cancelado']
@@ -745,19 +813,24 @@ with tab1:
             st.divider()
             st.subheader("Análise e Cruzamento de Dados")
 
-            col_md_id = 'N.º'
-            col_sn_id = 'Número'
-            for opt in ['Número', 'Number', 'number']:
-                if opt in df_sn.columns:
-                    col_sn_id = opt
-                    break
-            col_tpl_id = 'N.º'
+            # Localização inteligente de colunas
+            col_md_id = find_column_by_variants(df_md, ['N.º', 'N.o', 'Nº', 'No', 'Numero', 'ID']) or 'N.º'
+            col_sn_id = find_column_by_variants(df_sn, ['Número', 'Numero', 'Number', 'Task', 'Sys_id', 'Chamado', 'Task_number']) or 'Número'
+            col_tpl_id = find_column_by_variants(df_template, ['N.º', 'N.o', 'Nº', 'No', 'Numero', 'ID']) or 'N.º'
+            col_md_ext = find_column_by_variants(df_md, ['Nº Ocorrência Externa', 'Ocorrência Externa', 'Ocorrencia Externa', 'ServiceNow', 'Externa']) or 'Nº Ocorrência Externa'
+
+            # Validações de integridade dos arquivos carregados
+            if col_sn_id not in df_sn.columns:
+                st.error(f"❌ A coluna de identificação do ServiceNow não foi encontrada no arquivo enviado. Colunas presentes: {list(df_sn.columns)}")
+            
+            if col_md_id not in df_md.columns:
+                st.error(f"❌ A coluna de ID do Multidados não foi encontrada no arquivo enviado. Colunas presentes: {list(df_md.columns)}")
 
             # Garante string para comparaçao
             if col_md_id in df_md.columns: df_md[col_md_id] = df_md[col_md_id].astype(str).str.strip().str.replace('.0', '', regex=False)
             if col_md_id in df_md_clean.columns: df_md_clean[col_md_id] = df_md_clean[col_md_id].astype(str).str.strip().str.replace('.0', '', regex=False)
-            if col_sn_id in df_sn.columns: df_sn[col_sn_id] = df_sn[col_sn_id].astype(str).str.strip()
-            if col_sn_id in df_sn_clean.columns: df_sn_clean[col_sn_id] = df_sn_clean[col_sn_id].astype(str).str.strip()
+            if col_sn_id in df_sn.columns: df_sn[col_sn_id] = df_sn[col_sn_id].astype(str).str.strip().str.replace('.0', '', regex=False)
+            if col_sn_id in df_sn_clean.columns: df_sn_clean[col_sn_id] = df_sn_clean[col_sn_id].astype(str).str.strip().str.replace('.0', '', regex=False)
             if col_tpl_id in df_template.columns: df_template[col_tpl_id] = df_template[col_tpl_id].astype(str).str.strip().str.replace('.0', '', regex=False)
 
             # 1. Novos no Multidados
@@ -770,14 +843,15 @@ with tab1:
 
             # 2. Novos no ServiceNow (que não possuem correspondência no Multidados)
             # O ServiceNow usa o 'Número' para cruzar com o 'Nº Ocorrência Externa' do Multidados
-            if 'Nº Ocorrência Externa' in df_md.columns:
-                # Lista de ocorrencias externas no MD (tirando nulos) - USAR BASE COMPLETA PARA EVITAR FALSO POSITIVO
-                md_ext_ids_all = df_md['Nº Ocorrência Externa'].astype(str).str.strip().str.replace('.0', '', regex=False)
-                md_ext_ids_all = md_ext_ids_all[md_ext_ids_all != 'nan']
+            if col_md_ext in df_md.columns and col_sn_id in df_sn.columns:
+                # Lista de ocorrencias externas no MD (tirando nulos) - normalizada para maiúsculo
+                md_ext_series = df_md[col_md_ext].astype(str).str.strip().str.upper().str.replace('.0', '', regex=False)
+                md_ext_ids_all = set(md_ext_series[(md_ext_series != '') & (md_ext_series != 'NAN')].tolist())
 
                 # SN (filtrado) que nao estao no MD Ocorrencia Externa (completo)
                 if col_sn_id in df_sn_clean.columns:
-                    sn_not_in_md = df_sn_clean[~df_sn_clean[col_sn_id].isin(md_ext_ids_all)]
+                    sn_clean_series = df_sn_clean[col_sn_id].astype(str).str.strip().str.upper().str.replace('.0', '', regex=False)
+                    sn_not_in_md = df_sn_clean[~sn_clean_series.isin(md_ext_ids_all)]
                     if not sn_not_in_md.empty:
                         st.warning(f"⚠️ Atenção! Encontrados **{len(sn_not_in_md)} chamados** no ServiceNow que **NÃO constam no Multidados** (Nº Ocorrência Externa):")
                         cols_to_disp = [c for c in [col_sn_id, 'Estado', 'Atribuído a'] if c in sn_not_in_md.columns]
@@ -789,22 +863,26 @@ with tab1:
 
                 # 2.5 - Chamados no MD que não estão no SN (pelo Nº Ocorrência Externa)
                 # Pegar ocorrencias no MD que não sejam nulas
-                valid_md_ext = df_md_clean[df_md_clean['Nº Ocorrência Externa'].notna() & (df_md_clean['Nº Ocorrência Externa'].astype(str).str.strip() != '')]
+                valid_md_ext = df_md_clean[df_md_clean[col_md_ext].notna() & (df_md_clean[col_md_ext].astype(str).str.strip() != '') & (df_md_clean[col_md_ext].astype(str).str.strip().str.lower() != 'nan')]
                 
-                # Lista de chaves do SN completo para evitar falsos positivos de chamados ocultos pelo filtro de data
-                sn_all_ids = df_sn[col_sn_id].astype(str).str.strip() if col_sn_id in df_sn.columns else pd.Series(dtype=str)
+                # Lista de chaves do SN completo (em maiúsculo)
+                sn_all_ids = set(df_sn[col_sn_id].astype(str).str.strip().str.upper().str.replace('.0', '', regex=False).tolist())
                 
-                md_not_in_sn = valid_md_ext[~valid_md_ext['Nº Ocorrência Externa'].astype(str).str.strip().str.replace('.0', '', regex=False).isin(sn_all_ids)]
+                valid_md_norm = valid_md_ext[col_md_ext].astype(str).str.strip().str.upper().str.replace('.0', '', regex=False)
+                md_not_in_sn = valid_md_ext[~valid_md_norm.isin(sn_all_ids)]
 
                 # Lista de Ocorrencias Externas faltando no SN para pintarmos de vermelho depois
-                missing_in_sn_ids = set(md_not_in_sn['Nº Ocorrência Externa'].astype(str).str.strip().str.replace('.0', '', regex=False).tolist())
+                missing_in_sn_ids = set(md_not_in_sn[col_md_ext].astype(str).str.strip().str.replace('.0', '', regex=False).tolist())
 
                 if not md_not_in_sn.empty:
                     st.error(f"⚠️ Atenção! Encontrados **{len(md_not_in_sn)} chamados** no Multidados cujo *Nº Ocorrência Externa* **NÃO consta na extração do ServiceNow**. Eles serão destacados em vermelho na planilha final.")
-                    st.dataframe(md_not_in_sn[[col_md_id, 'Nº Ocorrência Externa', 'Status (sem tempo decorrido)']].head(10))
+                    st.dataframe(md_not_in_sn[[col_md_id, col_md_ext, 'Status (sem tempo decorrido)']].head(10))
+                else:
+                    st.success("✅ Todos os chamados com Nº Ocorrência Externa constam no ServiceNow.")
             else:
                 missing_in_sn_ids = set()
-                st.error("Coluna 'Nº Ocorrência Externa' não encontrada no Multidados para fazer as validações com ServiceNow.")
+                if col_md_ext not in df_md.columns:
+                    st.error(f"Coluna de Ocorrência Externa não encontrada no Multidados (colunas: {list(df_md.columns)}).")
 
 
             # 3. Comparar Existentes
@@ -839,8 +917,8 @@ with tab1:
 
                 # Novas regras de DE/PARA Multidados -> Template
                 # Nº Ocorrência Externa -> ServiceNow
-                if 'Nº Ocorrência Externa' in md_row.index and 'ServiceNow' in df_template.columns:
-                    val = md_row['Nº Ocorrência Externa']
+                if col_md_ext in md_row.index and 'ServiceNow' in df_template.columns:
+                    val = md_row[col_md_ext]
                     if pd.notna(val):
                         df_template.at[idx, 'ServiceNow'] = val
 
@@ -862,9 +940,9 @@ with tab1:
                         df_template.at[idx, 'Módulo'] = val_str
 
                 # Verificar Divergencia com ServiceNow e aplicar DE/PARA ServiceNow -> Template
-                num_ocorr_ext = str(row.get('Nº Ocorrência Externa', '')).strip().replace('.0', '')
-                if num_ocorr_ext and col_sn_id in df_sn.columns:
-                    sn_match = df_sn[df_sn[col_sn_id] == num_ocorr_ext]
+                num_ocorr_ext = str(md_row.get(col_md_ext, '') or row.get('ServiceNow', '') or row.get('Nº Ocorrência Externa', '')).strip().replace('.0', '')
+                if num_ocorr_ext and num_ocorr_ext.lower() != 'nan' and col_sn_id in df_sn.columns:
+                    sn_match = df_sn[df_sn[col_sn_id].astype(str).str.strip().str.upper().str.replace('.0', '', regex=False) == num_ocorr_ext.upper()]
                     if not sn_match.empty:
                         sn_row = sn_match.iloc[0]
 
