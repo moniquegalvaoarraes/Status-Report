@@ -41,10 +41,10 @@ STATUS_MAPPING = {
     "Direcionamento do chamado (Consultor)": "Em atendimento",
     "Redirecionamento do chamado (Devolução)": "Em atendimento",
     "Oportunidade de Melhoria": "Em atendimento",
-    "Encerrado": "Resolvido",
-    "Encerrada": "Resolvido",
-    "Cancelado": "Cancelado",
-    "Cancelada": "Cancelado"
+    "Encerrado": "Resolvido / Encerrado",
+    "Encerrada": "Resolvido / Encerrado",
+    "Cancelado": "Cancelado / Encerrado",
+    "Cancelada": "Cancelado / Encerrado"
 }
 
 def extract_data_from_multidados(limit_date_str=None):
@@ -328,6 +328,34 @@ def is_abaco_consultant(name):
         if len(parts) >= 2 and parts[0] in name_clean and parts[-1] in name_clean:
             return True
     return False
+
+STATUS_VALID_EQUIVALENTS = {
+    "aguardando feedback do cliente": ["pendente", "pending", "aguardando"],
+    "entendimento": ["em atendimento", "em andamento", "in progress", "work in progress"],
+    "entedimento": ["em atendimento", "em andamento", "in progress", "work in progress"],
+    "em execucao": ["em atendimento", "em andamento", "in progress", "work in progress"],
+    "direcionamento do chamado (consultor)": ["em atendimento", "em andamento", "in progress", "work in progress"],
+    "redirecionamento do chamado (devolucao)": ["em atendimento", "em andamento", "in progress", "work in progress"],
+    "oportunidade de melhoria": ["em atendimento", "em andamento", "in progress", "work in progress"],
+    "encerrado": ["resolvido", "encerrado", "fechado", "closed", "resolved"],
+    "encerrada": ["resolvido", "encerrado", "fechado", "closed", "resolved"],
+    "cancelado": ["cancelado", "encerrado", "fechado", "closed", "canceled", "cancelled"],
+    "cancelada": ["cancelado", "encerrado", "fechado", "closed", "canceled", "cancelled"]
+}
+
+def is_status_matching(md_status, sn_status):
+    if not md_status or not sn_status or pd.isna(md_status) or pd.isna(sn_status):
+        return True
+    md_clean = clean_col_name(str(md_status))
+    sn_clean = clean_col_name(str(sn_status))
+    
+    # Procura na tabela de equivalentes válidos
+    for key_md, valid_list in STATUS_VALID_EQUIVALENTS.items():
+        if key_md == md_clean or key_md in md_clean or md_clean in key_md:
+            return any(v in sn_clean or sn_clean in v for v in valid_list)
+            
+    # Se não mapeado, assume correspondência direta
+    return md_clean == sn_clean
 
 def convert_strict_to_transitional(file_bytes):
     import zipfile, io
@@ -1096,8 +1124,16 @@ with tab1:
                                 has_other_md_active = True
 
                         expected_sn_status = STATUS_MAPPING.get(md_status, 'Não mapeado')
+                        if expected_sn_status == 'Não mapeado':
+                            md_c = clean_col_name(str(md_status))
+                            for k, v in STATUS_MAPPING.items():
+                                if clean_col_name(k) in md_c or md_c in clean_col_name(k):
+                                    expected_sn_status = v
+                                    break
 
-                        if expected_sn_status != 'Não mapeado' and str(sn_status).strip().lower() != expected_sn_status.lower():
+                        is_divergent = not is_status_matching(md_status, sn_status)
+
+                        if is_divergent and expected_sn_status != 'Não mapeado':
                             # Se o chamado no MD está encerrado, mas existe outra ocorrência ativa no MD para o mesmo SN (alteração de projeto), não considera divergência
                             if not (str(md_status).strip().lower() in ['encerrado', 'encerrada', 'cancelado', 'cancelada'] and has_other_md_active):
                                 divergences.append({
