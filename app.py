@@ -1068,6 +1068,9 @@ with tab1:
             # 3. Comparar Existentes
             divergences = []
             external_assignees = []
+            red_highlight_ids = set()
+            if 'missing_in_sn_ids' in locals() and missing_in_sn_ids:
+                red_highlight_ids.update([str(x).strip().upper() for x in missing_in_sn_ids])
 
             for idx, row in df_template.iterrows():
                 t_id = str(row.get(col_tpl_id, ''))
@@ -1138,17 +1141,21 @@ with tab1:
                         # Validar Atribuição (Ábaco vs Externa)
                         if pd.notna(sn_assignee) and str(sn_assignee).strip() != '' and str(sn_assignee).strip().lower() != 'nan':
                             sn_assignee_str = str(sn_assignee).strip()
-                            if is_abaco_consultant(sn_assignee_str):
-                                # Se no template ainda não tem atribuição, preenche com o consultor Ábaco do SN
-                                if pd.isna(df_template.at[idx, 'Atribuído']) or str(df_template.at[idx, 'Atribuído']).strip() == '':
-                                    df_template.at[idx, 'Atribuído'] = sn_assignee_str
-                            else:
+                            
+                            # Atualiza a coluna Atribuído no Template com o responsável real do ServiceNow
+                            df_template.at[idx, 'Atribuído'] = sn_assignee_str
+
+                            if not is_abaco_consultant(sn_assignee_str):
                                 # Não é consultor Ábaco (ex: pessoal da TI BK)
+                                # Adiciona para destaque em vermelho na planilha final
+                                red_highlight_ids.add(num_ocorr_ext.upper())
+                                red_highlight_ids.add(str(t_id).strip())
+
                                 abaco_resp = md_row.get('Operador responsável', '') or row.get('Atribuído', '')
                                 external_assignees.append({
                                     'Nº Multidados': t_id,
                                     'Nº ServiceNow': num_ocorr_ext,
-                                    'Consultor Ábaco': abaco_resp,
+                                    'Consultor Ábaco (Multidados)': abaco_resp,
                                     'Atribuído no ServiceNow': sn_assignee_str,
                                     'Status Multidados': md_status,
                                     'Status ServiceNow': sn_status
@@ -1214,7 +1221,7 @@ with tab1:
 
             if external_assignees:
                 st.warning(f"⚠️ **Chamados com responsáveis fora da Ábaco no ServiceNow ({len(external_assignees)}):**")
-                st.info("💡 Esses chamados foram localizados no ServiceNow, mas estão atribuídos a pessoas de fora da equipe Ábaco (ex: equipe de TI). O relatório manteve o consultor da Ábaco responsável.")
+                st.info("💡 Esses chamados foram localizados no ServiceNow atribuídos a pessoas de fora da equipe Ábaco (ex: equipe interna de TI). Na planilha final, a coluna **Atribuído** recebeu o nome dessa pessoa e a linha correspondente foi **destacada em vermelho**.")
                 st.dataframe(pd.DataFrame(external_assignees))
 
             # 4. Filter final Template (drop old closed tickets) and Download
@@ -1261,7 +1268,17 @@ with tab1:
                 if dc in df_final.columns:
                     df_final[dc] = pd.to_datetime(df_final[dc], errors='coerce', dayfirst=True).dt.strftime('%d/%m/%Y')
 
-            st.dataframe(df_final, use_container_width=True)
+            def highlight_red_rows(row):
+                sn_val = str(row.get('ServiceNow', '') or '').strip().upper()
+                md_val = str(row.get('N.º', '') or '').strip()
+                if sn_val in red_highlight_ids or md_val in red_highlight_ids:
+                    return ['background-color: #FFC7CE; color: #9C0006'] * len(row)
+                return [''] * len(row)
+
+            try:
+                st.dataframe(df_final.style.apply(highlight_red_rows, axis=1), use_container_width=True)
+            except Exception:
+                st.dataframe(df_final, use_container_width=True)
 
             output = io.BytesIO()
 
@@ -1319,12 +1336,20 @@ with tab1:
                     else:
                         ws.cell(row=row_idx, column=col_idx, value=val_str)
 
-                # 3. Pintar a linha de vermelho se o ticket MD nao tiver no SN
-                if sn_col_idx and missing_in_sn_ids:
-                    cell_val = str(ws.cell(row=row_idx, column=sn_col_idx).value or "").strip()
-                    if cell_val in missing_in_sn_ids:
-                        for col_offset in range(1, len(COLUMNS_TO_KEEP) + 1):
-                            ws.cell(row=row_idx, column=col_offset).fill = red_fill
+                # 3. Pintar a linha de vermelho se o ticket MD nao tiver no SN ou estiver com responsável fora da Ábaco
+                is_red = False
+                if sn_col_idx:
+                    cell_sn_val = str(ws.cell(row=row_idx, column=sn_col_idx).value or "").strip().upper()
+                    if cell_sn_val in red_highlight_ids:
+                        is_red = True
+
+                cell_md_val = str(ws.cell(row=row_idx, column=1).value or "").strip()
+                if cell_md_val in red_highlight_ids:
+                    is_red = True
+
+                if is_red:
+                    for col_offset in range(1, len(COLUMNS_TO_KEEP) + 1):
+                        ws.cell(row=row_idx, column=col_offset).fill = red_fill
 
             # 4. Transformar tudo numa Tabela Formatada (Azul - Estilo Médio 9)
             max_col_letter = openpyxl.utils.get_column_letter(len(COLUMNS_TO_KEEP))
