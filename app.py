@@ -357,6 +357,57 @@ def is_status_matching(md_status, sn_status):
     # Se não mapeado, assume correspondência direta
     return md_clean == sn_clean
 
+STATUS_TO_EM_ATENDIMENTO = [
+    "novo",
+    "feedback retornado",
+    "chamado aberto na sap",
+    "direcionado para a entrega da solucao",
+    "direcionamento do chamado (consultor)",
+    "documentacao",
+    "documentacao de duvida",
+    "em execucao",
+    "entendimento",
+    "entedimento",
+    "entrega da solucao",
+    "execucao transp. request abaco",
+    "execucao transp. request",
+    "oportunidade de melhoria",
+    "redirecionamento do chamado (devolucao)",
+    "solicitacao transp. request abaco",
+    "solicitacao transp. request",
+    "teste unitario"
+]
+
+STATUS_TO_AGUARDANDO_CLIENTE = [
+    "encaminha a proposta para o cliente",
+    "encaminhar a proposta para o cliente",
+    "encaminhar para pre-vendas",
+    "proposta enviada",
+    "aguardando feedback do cliente"
+]
+
+def standardize_template_status(val):
+    if not val or pd.isna(val) or str(val).strip().lower() == 'nan':
+        return val
+    val_str = str(val).strip()
+    val_clean = clean_col_name(val_str)
+    
+    # 1. Preservar Encerrado / Cancelado
+    if any(c in val_clean for c in ['encerrad', 'cancelad', 'fechad', 'resolvid']):
+        return val_str
+        
+    # 2. Aguardando Feedback do Cliente
+    for s in STATUS_TO_AGUARDANDO_CLIENTE:
+        if s in val_clean or val_clean in s:
+            return "Aguardando Feedback do Cliente"
+            
+    # 3. Em atendimento
+    for s in STATUS_TO_EM_ATENDIMENTO:
+        if s in val_clean or val_clean in s:
+            return "Em atendimento"
+            
+    return val_str
+
 def convert_strict_to_transitional(file_bytes):
     import zipfile, io
     zin = zipfile.ZipFile(io.BytesIO(file_bytes), 'r')
@@ -1173,6 +1224,10 @@ with tab1:
             # Agora que o Template foi atualizado com as datas reais do MD, podemos filtrar limpo
             df_template = filter_active_tickets(df_template, date_cols=['Data de encerramento', 'Data da Última modificação'], status_col='Status (sem tempo decorrido)', closed_statuses=closed_md)
 
+            # Padronização de status das ocorrências para a planilha final do Status Report
+            if 'Status (sem tempo decorrido)' in df_template.columns:
+                df_template['Status (sem tempo decorrido)'] = df_template['Status (sem tempo decorrido)'].apply(standardize_template_status)
+
             COLUMNS_TO_KEEP = [
                 'N.º', 'ServiceNow', 'Titulo', 'Projeto', 'Data de abertura', 
                 'Data da Última modificação', 'Data de encerramento', 'Solicitante', 
@@ -1205,6 +1260,8 @@ with tab1:
             for dc in date_cols:
                 if dc in df_final.columns:
                     df_final[dc] = pd.to_datetime(df_final[dc], errors='coerce', dayfirst=True).dt.strftime('%d/%m/%Y')
+
+            st.dataframe(df_final, use_container_width=True)
 
             output = io.BytesIO()
 
